@@ -1,6 +1,6 @@
 # SC Mining Extractor
 
-Extracts mineable ore data from Star Citizen game files and generates JSON datasets with deposit compositions, ore probabilities, percentage ranges, and quality scales.
+Extracts mineable ore data from Star Citizen game files and generates JSON datasets with deposit compositions, ore probabilities, percentage ranges, quality scales, and spawn locations across all systems.
 
 ---
 
@@ -28,17 +28,13 @@ You need to extract files from it. The recommended tool is **unp4k**.
    unp4k /path/to/StarCitizen/LIVE/Data.p4k -o /path/to/extract
    ```
 
-   This extracts the full archive into a `Data/` folder at the output path.
-
-3. **Option B — Extract only mining data** (fast, a few MB):
-
-   Use a filter to extract only the files needed by this script:
+3. **Option B — Extract only the files needed by this script** (fast, a few hundred MB):
 
    ```
    unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Libs/Foundry/Records/mining/*" -o /path/to/extract
+   unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Libs/Foundry/Records/harvestable/*" -o /path/to/extract
+   unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Libs/Foundry/Records/entities/mineable/*" -o /path/to/extract
    ```
-
-   This creates a `Data/` folder containing only the mining XML files.
 
 4. After extraction you should have a folder structure like:
 
@@ -48,13 +44,20 @@ You need to extract files from it. The recommended tool is **unp4k**.
        └── Libs/
            └── Foundry/
                └── Records/
-                   └── mining/
-                       ├── mineableelements/
-                       ├── rockcompositionpresets/
-                       │   ├── surfaceshipmining/
-                       │   └── asteroidshipmining/
-                       ├── miningglobalparams.xml
-                       └── ...
+                   ├── mining/
+                   │   ├── mineableelements/
+                   │   └── rockcompositionpresets/
+                   │       ├── surfaceshipmining/
+                   │       └── asteroidshipmining/
+                   ├── harvestable/
+                   │   ├── harvestablepresets/
+                   │   └── providerpresets/
+                   │       └── system/
+                   │           ├── stanton/
+                   │           ├── pyro/
+                   │           └── nyx/
+                   └── entities/
+                       └── mineable/
    ```
 
 ---
@@ -63,24 +66,11 @@ You need to extract files from it. The recommended tool is **unp4k**.
 
 Move or copy the extracted `Data/` folder into the `input/` directory of this project:
 
-```
-sc-mining-extractor/
-└── input/
-    └── Data/                  ← place it here
-        └── Libs/
-            └── Foundry/
-                └── Records/
-                    └── mining/
-                        ├── mineableelements/
-                        ├── rockcompositionpresets/
-                        └── ...
-```
-
 ```bash
 mv /path/to/extract/Data /path/to/sc-mining-extractor/input/
 ```
 
-The script expects to find files at exactly this path. If your extraction produced a different directory layout, adjust accordingly.
+The script expects files at exactly this path.
 
 ---
 
@@ -99,13 +89,24 @@ Loading ore element definitions…
   43 ore elements loaded.
 
 Loading rock composition presets…
-  237 deposits loaded.
+  237 compositions loaded.
+
+Loading mineable entity class definitions…
+  266 mineable entities loaded.
+
+Loading harvestable presets…
+  571 harvestable presets loaded.
+
+Loading and resolving location provider presets…
+  45 locations with mining data loaded.
 
 Writing output files…
   Written: output/ores.json  (43 entries)
   Written: output/deposits.json  (237 entries)
   Written: output/deposits_by_category.json  (7 entries)
   Written: output/ores_in_deposits.json  (42 entries)
+  Written: output/locations.json  (45 entries)
+  Written: output/ores_by_location.json  (33 entries)
 
 Extraction complete.
 ```
@@ -145,9 +146,11 @@ A list of all 43 mineable ore/element definitions.
 | `id` | Internal UUID used as a cross-reference key |
 | `name` | Internal name as found in the XML |
 | `display_name` | Human-readable name |
+| `resource_type` | UUID of the associated `ResourceType` record (links to commodity data) |
 | `instability` | How much the rock destabilises when this ore is hit |
 | `resistance` | Mining resistance modifier |
 | `optimal_window_midpoint` | Centre of the optimal extraction window (0–1) |
+| `optimal_window_midpoint_randomness` | Random offset applied to the midpoint each spawn |
 | `optimal_window_thinness` | Width of the optimal window — more negative = narrower |
 | `explosion_multiplier` | Explosion risk factor |
 | `cluster_factor` | How tightly this ore clusters within a deposit |
@@ -166,6 +169,7 @@ A list of all 237 rock/deposit composition presets, sorted by category then name
     "display_name": "Asteroid Name 4",
     "deposit_name_key": "@hud_mining_asteroid_name_4",
     "category": "asteroid",
+    "rarity": null,
     "minimum_distinct_elements": 3,
     "source_file": "rockcompositionpresets/asteroid_qtype_iron.xml",
     "composition": [
@@ -189,26 +193,28 @@ A list of all 237 rock/deposit composition presets, sorted by category then name
 | Field | Description |
 |-------|-------------|
 | `category` | Deposit context — see categories table below |
-| `rarity` | `common` / `uncommon` / `rare` / `epic` / `legendary` (ship mining only) |
+| `rarity` | `common` / `uncommon` / `rare` / `epic` / `legendary` (ship-mining presets only; `null` for others) |
 | `minimum_distinct_elements` | Minimum number of different ores that must be present |
 | `composition[].probability` | Probability (0–1) that this ore appears at all in a given rock |
-| `composition[].min_percentage` | Minimum percentage of this ore in the deposit |
-| `composition[].max_percentage` | Maximum percentage of this ore in the deposit |
+| `composition[].min_percentage` | Minimum percentage this ore contributes to the deposit |
+| `composition[].max_percentage` | Maximum percentage this ore contributes to the deposit |
 | `composition[].quality_scale` | Quality multiplier for extracted ore (1.0 = full quality, 0.49 = ~half) |
+| `composition[].curve_exponent` | Distribution curve exponent for percentage rolls |
 
 **Deposit categories:**
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| `asteroid` | 70 | Generic asteroid composition presets |
-| `asteroid_ship` | 27 | Ship-mined asteroid deposits (with rarity tiers) |
+| `asteroid` | 70 | Generic asteroid composition presets (used by asteroid-type rocks) |
+| `asteroid_ship` | 27 | Ship-mined asteroid deposits — have rarity tiers |
 | `surface` | 12 | Generic planetary surface deposits |
-| `surface_ship` | 26 | Ship-mined surface deposits (with rarity tiers) |
+| `surface_ship` | 26 | Ship-mined surface deposits — have rarity tiers |
 | `fps` | 12 | FPS hand-mining deposits |
+| `vehicle` | 8 | Ground vehicle mining deposits |
 | `test` | 17 | Internal test/balance compositions |
-| `other` | 73 | Ore-specific surface deposit variants |
+| `other` | 65 | Ore-specific surface deposit variants |
 
-**Note on duplicate ore entries:** Some deposits list the same ore twice with different `quality_scale` values. This is intentional — it represents a high-quality fraction (e.g. `quality_scale: 1.0`, 2–7%) and a bulk lower-quality fraction (e.g. `quality_scale: 0.49`, 39–83%) of the same material within one rock.
+**Note on duplicate ore entries:** Some deposits list the same ore twice with different `quality_scale` values. This is intentional — it represents a high-quality fraction (e.g. `quality_scale: 1.0`, 2–7%) and a bulk lower-quality fraction (e.g. `quality_scale: 0.49`, 39–83%) of the same material in one rock.
 
 ---
 
@@ -238,16 +244,16 @@ Inverted index: for each ore, every deposit that contains it, sorted by probabil
 
 ```json
 {
-  "Quantainium_Raw": [
+  "Savrilium_Ore": [
     {
-      "deposit_name": "LegendaryShipMineablesAsteroid_Quantainium",
-      "deposit_display_name": "Quantainium Raw",
-      "deposit_id": "...",
+      "deposit_name": "LegendaryShipMineablesAsteroid_Savrilium",
+      "deposit_display_name": "Savrilium Ore",
+      "deposit_id": "3375ee93-f695-40d2-b86c-1ad23802e59b",
       "category": "asteroid_ship",
       "rarity": "legendary",
       "probability": 1.0,
-      "min_percentage": 2.8,
-      "max_percentage": 6.8,
+      "min_percentage": 2.82,
+      "max_percentage": 6.82,
       "quality_scale": 1.0
     },
     ...
@@ -256,7 +262,142 @@ Inverted index: for each ore, every deposit that contains it, sorted by probabil
 }
 ```
 
-Useful for answering "which deposits can I find ore X in, and how likely is it?"
+Answers: "which deposit types can contain ore X, and in what quantities?"
+
+---
+
+### `locations.json` *(new)*
+
+A list of 45 locations (planets, moons, asteroid fields) across the Stanton, Pyro, and Nyx systems. Each location contains its mining groups fully resolved down to ore compositions.
+
+```json
+[
+  {
+    "id": "230aecd3-2e5b-4d58-a884-bbba59a40cf7",
+    "name": "Keeger Belt (Nyx)",
+    "system": "Nyx",
+    "body": "Keeger Belt",
+    "zone_type": "asteroid_field",
+    "source_file": "providerpresets/system/nyx/asteroidfield/hpp_nyx_keegerbelt.xml",
+    "groups": [
+      {
+        "group_name": "SpaceShip_Mineables",
+        "mining_mode": "ship",
+        "group_probability": 0.1,
+        "total_relative_probability": 100.0,
+        "items": [
+          {
+            "relative_probability": 28.5,
+            "normalized_probability": 0.285,
+            "preset_name": "Mining_AsteroidUncommon_Torite",
+            "respawn_time_s": 3600,
+            "despawn_time_s": 600,
+            "scale_min": 0.6,
+            "scale_max": 1.0,
+            "entity_name": "MineableRock_AsteroidUncommon_Torite",
+            "laser_damage_full_value": 2500.0,
+            "composition_name": "UncommonShipMineablesAsteroid_Torite",
+            "composition_category": "asteroid_ship",
+            "rarity": "uncommon",
+            "minimum_distinct_elements": 2,
+            "composition": [
+              {
+                "ore_name": "Torite_Ore",
+                "probability": 1.0,
+                "min_percentage": 2.82,
+                "max_percentage": 6.82,
+                "quality_scale": 1.0
+              },
+              ...
+            ]
+          },
+          ...
+        ]
+      }
+    ]
+  },
+  ...
+]
+```
+
+**Location fields:**
+
+| Field | Description |
+|-------|-------------|
+| `system` | Star system: `Stanton`, `Pyro`, or `Nyx` |
+| `body` | Planet, moon, or asteroid field name |
+| `zone_type` | `planet` or `asteroid_field` |
+| `groups[].mining_mode` | `ship`, `fps`, `vehicle`, or `general` |
+| `groups[].group_probability` | Density weight for this group type spawning at this location |
+| `groups[].total_relative_probability` | Sum of all `relative_probability` values in the group (used as denominator for normalization) |
+| `items[].relative_probability` | Spawn weight of this specific rock type within its group |
+| `items[].normalized_probability` | `relative_probability / total_relative_probability` — share of spawns this rock type takes |
+| `items[].respawn_time_s` | Seconds until the rock respawns after being mined |
+| `items[].despawn_time_s` | Seconds until a mined rock's debris despawns |
+| `items[].scale_min` / `scale_max` | Random scale range applied to spawned rocks |
+| `items[].laser_damage_full_value` | Laser power required to deal full damage to this rock |
+| `items[].rarity` | Rarity tier of the deposit (`common` … `legendary`) |
+
+Only groups that contain at least one resolvable mineable rock are included. Non-mining harvestables (plants, salvage derelicts, etc.) are filtered out.
+
+---
+
+### `ores_by_location.json` *(new)*
+
+Inverted index: for each ore, every location and group where it can spawn. Each entry represents one composition part (since the same ore can appear twice in one deposit with different quality tiers, both entries are listed separately).
+
+```json
+{
+  "Savrilium_Ore": [
+    {
+      "location_id": "e9aa8f98-4c87-468f-ae03-10a96d9497e5",
+      "location_name": "Glaciem Ring (Nyx)",
+      "system": "Nyx",
+      "body": "Glaciem Ring",
+      "zone_type": "asteroid_field",
+      "mining_mode": "ship",
+      "group_name": "SpaceShip_Mineables",
+      "group_probability": 0.1,
+      "relative_probability": 2.0,
+      "normalized_probability": 0.02,
+      "preset_name": "Mining_AsteroidLegendary_Savrilium",
+      "entity_name": "MineableRock_AsteroidLegendary_Savrilium",
+      "composition_name": "LegendaryShipMineablesAsteroid_Savrilium",
+      "composition_category": "asteroid_ship",
+      "rarity": "legendary",
+      "respawn_time_s": 3600,
+      "scale_min": 0.6,
+      "scale_max": 1.0,
+      "ore_probability": 1.0,
+      "ore_min_percentage": 2.82,
+      "ore_max_percentage": 6.82,
+      "ore_quality_scale": 1.0
+    },
+    ...
+  ],
+  ...
+}
+```
+
+Answers: "where in the game can I find ore X, with what spawn weight, and in what concentration?"
+
+Entries are sorted by system → body → group probability descending.
+
+---
+
+## Data pipeline
+
+The script resolves a five-level chain from location down to raw ore:
+
+```
+HarvestableProviderPreset  (location file)
+  └─ HarvestableElement.harvestable UUID
+       └─ HarvestablePreset.entityClass UUID
+            └─ EntityClassDefinition (MineableParams.composition UUID)
+                 └─ MineableComposition
+                      └─ MineableCompositionPart.mineableElement UUID
+                           └─ MineableElement  (ore properties)
+```
 
 ---
 
@@ -267,12 +408,19 @@ sc-mining-extractor/
 ├── extract_mining_data.py     # extraction script
 ├── input/
 │   └── Data/                  # extracted game files go here
-│       └── Libs/Foundry/Records/mining/
-│           ├── mineableelements/
-│           └── rockcompositionpresets/
+│       └── Libs/Foundry/Records/
+│           ├── mining/
+│           │   ├── mineableelements/
+│           │   └── rockcompositionpresets/
+│           ├── harvestable/
+│           │   ├── harvestablepresets/
+│           │   └── providerpresets/system/
+│           └── entities/mineable/
 └── output/                    # generated JSON files (created on first run)
     ├── ores.json
     ├── deposits.json
     ├── deposits_by_category.json
-    └── ores_in_deposits.json
+    ├── ores_in_deposits.json
+    ├── locations.json
+    └── ores_by_location.json
 ```
