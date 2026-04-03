@@ -3,13 +3,15 @@
 Extract mineable ore data from Star Citizen mining XML files.
 
 Generates:
-  - ores.json                  : ore/element definitions with all mining properties
+  - ores.json                  : ore/element definitions with all mining properties,
+                                   including refined commodity linkage
   - deposits.json              : rock/deposit compositions with resolved ore names
   - deposits_by_category.json  : deposits grouped by category
   - ores_in_deposits.json      : inverted index — ore → every deposit containing it
   - locations.json             : provider presets fully resolved:
                                    location → mining groups → presets → entity → composition → ores
   - ores_by_location.json      : inverted index — ore → every location where it spawns
+  - refining_processes.json    : all refining speed × quality method combinations
 """
 
 import json
@@ -18,12 +20,15 @@ from xml.etree import ElementTree as ET
 from collections import defaultdict
 
 
-RECORDS_DIR    = Path(__file__).parent / "input" / "Data" / "Libs" / "Foundry" / "Records"
-MINING_DIR     = RECORDS_DIR / "mining"
+RECORDS_DIR     = Path(__file__).parent / "input" / "Data" / "Libs" / "Foundry" / "Records"
+MINING_DIR      = RECORDS_DIR / "mining"
 HARVESTABLE_DIR = RECORDS_DIR / "harvestable"
-ENTITIES_DIR   = RECORDS_DIR / "entities" / "mineable"
-PROVIDER_DIR   = HARVESTABLE_DIR / "providerpresets" / "system"
-OUTPUT_DIR     = Path(__file__).parent / "output"
+ENTITIES_DIR    = RECORDS_DIR / "entities" / "mineable"
+PROVIDER_DIR    = HARVESTABLE_DIR / "providerpresets" / "system"
+REFINING_DIR    = RECORDS_DIR / "refiningprocess"
+GAME2_PATH      = Path(__file__).parent / "input" / "Data" / "Game2.xml"
+LOCALIZATION_PATH = Path(__file__).parent / "input" / "Data" / "Localization" / "english" / "global.ini"
+OUTPUT_DIR      = Path(__file__).parent / "output"
 
 NULL_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -170,10 +175,136 @@ def write_json(path: Path, data) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Step 0a — ResourceType records (from Game2.xml)
+# ---------------------------------------------------------------------------
+
+def load_resource_types(game2_path: Path) -> dict:
+    """
+    Parses Game2.xml with iterparse and extracts all ResourceType records.
+    Returns { uuid: { name, display_name, refined_version_id } }
+    """
+    resource_types: dict = {}
+
+    if not game2_path.is_file():
+        print(f"  [WARN] Game2.xml not found at {game2_path} — refined commodity data will be unavailable.")
+        return resource_types
+
+    for _event, elem in ET.iterparse(game2_path, events=("end",)):
+        if elem.get("__type") != "ResourceType":
+            elem.clear()
+            continue
+        ref = elem.get("__ref", "")
+        if not ref or ref == NULL_UUID:
+            elem.clear()
+            continue
+        name = _tag_suffix(elem.tag)                        # e.g. "Ore_Iron" or "Iron"
+        display_key = elem.get("displayName", "")
+        display_name = _localization_to_display(display_key) if display_key else name.replace("_", " ").title()
+        refined_version_id = elem.get("refinedVersion", NULL_UUID)
+
+        resource_types[ref] = {
+            "id":                ref,
+            "name":              name,
+            "display_name":      display_name,
+            "refined_version_id": refined_version_id if refined_version_id != NULL_UUID else None,
+        }
+        elem.clear()
+
+    return resource_types
+
+
+# ---------------------------------------------------------------------------
+# Step 0b — Localization strings
+# ---------------------------------------------------------------------------
+
+def load_localization(ini_path: Path) -> dict:
+    """
+    Parses a Star Citizen global.ini localization file (key=value, UTF-8 BOM).
+    Returns { key: value } with lowercase keys for case-insensitive lookup.
+    """
+    strings: dict = {}
+    if not ini_path.is_file():
+        print(f"  [WARN] Localization file not found: {ini_path}")
+        return strings
+    with open(ini_path, encoding="utf-8-sig") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith(";") or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            strings[key.strip().lower()] = value.strip()
+    return strings
+
+
+def _loc(strings: dict, key: str, fallback: str = "") -> str:
+    """Look up a localization key (strip leading @, case-insensitive)."""
+    k = key.lstrip("@").lower()
+    return strings.get(k, fallback)
+
+
+# ---------------------------------------------------------------------------
+# Step 0c — RefiningProcess records
+# ---------------------------------------------------------------------------
+
+def load_refining_processes(refining_dir: Path, strings: dict) -> list:
+    """
+    Parses all RefiningProcess XML files.
+    Returns a list of process dicts sorted by speed then quality.
+    """
+    SPEED_ORDER = {"Slow": 0, "Normal": 1, "Fast": 2}
+    QUALITY_ORDER = {"Careful": 0, "Normal": 1, "Wasteful": 2}
+
+    processes = []
+    for xml_file in sorted(refining_dir.glob("*.xml")):
+        root = _parse_xml(xml_file)
+        if root is None or root.get("__type") != "RefiningProcess":
+            continue
+        ref = root.get("__ref", "")
+        name = _tag_suffix(root.tag)
+        speed   = root.get("refiningSpeed", "")
+        quality = root.get("refiningQuality", "")
+        loc_key = root.get("processName", "")          # e.g. @refinery_ui_ProcessingType_FastCareful
+
+        display_name = _loc(strings, loc_key) or _localization_to_display(loc_key) or name.replace("_", " ").title()
+        description  = _loc(strings, loc_key + "_Desc")
+        details_raw  = _loc(strings, loc_key + "_Details")
+        # Details string: "Low Speed // High Cost // High Yield" → parse into structured fields
+        details: dict = {}
+        if details_raw:
+            for part in details_raw.split("//"):
+                part = part.strip().rstrip("\\n").strip()
+                if not part:
+                    continue
+                # "Low Speed" → speed_tier="Low", "High Cost" → cost_tier="High", etc.
+                words = part.split()
+                if len(words) >= 2:
+                    tier, dimension = words[0], words[-1].lower()
+                    details[f"{dimension}_tier"] = tier
+
+        processes.append({
+            "id":           ref,
+            "name":         name,
+            "display_name": display_name,
+            "speed":        speed,
+            "quality":      quality,
+            "description":  description or None,
+            "speed_tier":   details.get("speed_tier"),
+            "cost_tier":    details.get("cost_tier"),
+            "yield_tier":   details.get("yield_tier"),
+            "source_file":  xml_file.name,
+        })
+
+    processes.sort(key=lambda p: (SPEED_ORDER.get(p["speed"], 9), QUALITY_ORDER.get(p["quality"], 9)))
+    return processes
+
+
+# ---------------------------------------------------------------------------
 # Step 1 — MineableElement definitions
 # ---------------------------------------------------------------------------
 
-def load_ore_elements(elements_dir: Path) -> dict:
+def load_ore_elements(elements_dir: Path, resource_types: dict) -> dict:
     """Returns { uuid: ore_dict } for every MineableElement XML."""
     ores: dict = {}
     for xml_file in sorted(elements_dir.glob("*.xml")):
@@ -186,11 +317,21 @@ def load_ore_elements(elements_dir: Path) -> dict:
         ore_name = _tag_suffix(root.tag)
         if "template" in ore_name.lower():
             continue
+
+        resource_type_id = root.get("resourceType", "")
+        rt = resource_types.get(resource_type_id)
+        refined_rt_id = rt["refined_version_id"] if rt else None
+        refined_rt = resource_types.get(refined_rt_id) if refined_rt_id else None
+
         ores[ref] = {
             "id":                             ref,
             "name":                           ore_name,
             "display_name":                   ore_name.replace("_", " ").title(),
-            "resource_type":                  root.get("resourceType", ""),
+            "resource_type":                  resource_type_id,
+            "can_be_refined":                 refined_rt is not None,
+            "refined_resource_type_id":       refined_rt_id,
+            "refined_name":                   refined_rt["name"] if refined_rt else None,
+            "refined_display_name":           refined_rt["display_name"] if refined_rt else None,
             "instability":                    _f(root.get("elementInstability")),
             "resistance":                     _f(root.get("elementResistance")),
             "optimal_window_midpoint":        _f(root.get("elementOptimalWindowMidpoint")),
@@ -614,8 +755,16 @@ def main() -> None:
             raise SystemExit(f"[ERROR] Directory not found: {p}")
 
     # --- Load source data ---
+    print("Loading localization strings…")
+    strings = load_localization(LOCALIZATION_PATH)
+    print(f"  {len(strings)} localization entries loaded.\n")
+
+    print("Loading resource type definitions from Game2.xml…")
+    resource_types = load_resource_types(GAME2_PATH)
+    print(f"  {len(resource_types)} resource types loaded.\n")
+
     print("Loading ore element definitions…")
-    ores_by_id = load_ore_elements(elements_dir)
+    ores_by_id = load_ore_elements(elements_dir, resource_types)
     print(f"  {len(ores_by_id)} ore elements loaded.\n")
 
     print("Loading rock composition presets…")
@@ -679,6 +828,10 @@ def main() -> None:
     # 6. ores_by_location.json
     ores_by_location = build_ores_by_location(locations)
     write_json(OUTPUT_DIR / "ores_by_location.json", ores_by_location)
+
+    # 7. refining_processes.json
+    refining_processes = load_refining_processes(REFINING_DIR, strings)
+    write_json(OUTPUT_DIR / "refining_processes.json", refining_processes)
 
     print("\nExtraction complete.")
 

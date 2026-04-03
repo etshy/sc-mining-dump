@@ -34,6 +34,8 @@ You need to extract files from it. The recommended tool is **unp4k**.
    unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Libs/Foundry/Records/mining/*" -o /path/to/extract
    unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Libs/Foundry/Records/harvestable/*" -o /path/to/extract
    unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Libs/Foundry/Records/entities/mineable/*" -o /path/to/extract
+   unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Libs/Foundry/Records/refiningprocess/*" -o /path/to/extract
+   unp4k /path/to/StarCitizen/LIVE/Data.p4k "Data/Localization/english/global.ini" -o /path/to/extract
    ```
 
 4. After extraction you should have a folder structure like:
@@ -85,6 +87,12 @@ No dependencies beyond the Python standard library are required.
 ### Expected output
 
 ```
+Loading localization strings…
+  87591 localization entries loaded.
+
+Loading resource type definitions from Game2.xml…
+  195 resource types loaded.
+
 Loading ore element definitions…
   43 ore elements loaded.
 
@@ -107,11 +115,14 @@ Writing output files…
   Written: output/ores_in_deposits.json  (42 entries)
   Written: output/locations.json  (45 entries)
   Written: output/ores_by_location.json  (33 entries)
+  Written: output/refining_processes.json  (9 entries)
 
 Extraction complete.
 ```
 
 All JSON files are written to the `output/` directory (created automatically if absent).
+
+> **Note:** Resource type data (`Game2.xml`) is required for the refined commodity linkage in `ores.json`. If `Game2.xml` is absent, a warning is printed and the `can_be_refined`, `refined_name`, and related fields will be `null` / `false` for all ores. All other outputs are unaffected.
 
 ---
 
@@ -128,6 +139,10 @@ A list of all 43 mineable ore/element definitions.
     "name": "Iron_Ore",
     "display_name": "Iron Ore",
     "resource_type": "32c57a12-5de5-49b1-827a-9fd80278fbc4",
+    "can_be_refined": true,
+    "refined_resource_type_id": "a3f8c201-...",
+    "refined_name": "Iron",
+    "refined_display_name": "Iron",
     "instability": 50.0,
     "resistance": -0.4,
     "optimal_window_midpoint": 0.6,
@@ -146,7 +161,11 @@ A list of all 43 mineable ore/element definitions.
 | `id` | Internal UUID used as a cross-reference key |
 | `name` | Internal name as found in the XML |
 | `display_name` | Human-readable name |
-| `resource_type` | UUID of the associated `ResourceType` record (links to commodity data) |
+| `resource_type` | UUID of the raw ore `ResourceType` record |
+| `can_be_refined` | `true` if this ore has a refined commodity output; `false` for FPS/vehicle-only ores |
+| `refined_resource_type_id` | UUID of the refined commodity `ResourceType`; `null` if not refinable |
+| `refined_name` | Internal name of the refined commodity (e.g. `"Iron"`); `null` if not refinable |
+| `refined_display_name` | Human-readable name of the refined commodity; `null` if not refinable |
 | `instability` | How much the rock destabilises when this ore is hit |
 | `resistance` | Mining resistance modifier |
 | `optimal_window_midpoint` | Centre of the optimal extraction window (0–1) |
@@ -385,6 +404,58 @@ Entries are sorted by system → body → group probability descending.
 
 ---
 
+### `refining_processes.json` *(new)*
+
+All 9 refining method combinations available at refineries, sorted by speed (Slow → Normal → Fast) then quality (Careful → Normal → Wasteful).
+
+```json
+[
+  {
+    "id": "...",
+    "name": "ProcessingType_SlowCareful",
+    "display_name": "Dinyx Solventation",
+    "speed": "Slow",
+    "quality": "Careful",
+    "description": "This process slowly sublimates raw materials in a pressurized Dinyx chamber...",
+    "speed_tier": "Very",
+    "cost_tier": "Low",
+    "yield_tier": "High",
+    "source_file": "processingtype-slowcareful.xml"
+  },
+  ...
+]
+```
+
+| Field | Description |
+|-------|-------------|
+| `id` | Internal UUID |
+| `name` | Internal record name |
+| `display_name` | In-game name from localization (e.g. `"Dinyx Solventation"`) |
+| `speed` | Refining speed category: `Slow`, `Normal`, or `Fast` |
+| `quality` | Refining quality category: `Careful`, `Normal`, or `Wasteful` |
+| `description` | Full in-game flavor/description text |
+| `speed_tier` | Speed label shown in-game: `Very` (low), `Low`, `Moderate`, or `High` |
+| `cost_tier` | Cost label: `Low`, `Moderate`, or `High` |
+| `yield_tier` | Yield label: `Low`, `Moderate`, or `High` |
+
+All 9 processes sorted by speed (Slow → Normal → Fast) then quality (Careful → Normal → Wasteful):
+
+| Display Name | Speed | Quality | Speed | Cost | Yield |
+|---|---|---|---|---|---|
+| Dinyx Solventation | Slow | Careful | Very low | Low | High |
+| Thermonatic Deposition | Slow | Normal | Low | Low | Moderate |
+| Kazen Winnowing | Slow | Wasteful | Moderate | Low | Low |
+| Ferron Exchange | Normal | Careful | Low | Moderate | High |
+| Electrostarolysis | Normal | Normal | Moderate | Moderate | Moderate |
+| Cormack Method | Normal | Wasteful | High | Moderate | Low |
+| Pyrometric Chromalysis | Fast | Careful | Low | High | High |
+| Gaskin Process | Fast | Normal | High | High | Moderate |
+| XCR Reaction | Fast | Wasteful | High | High | Low |
+
+**Note:** The game data contains only the speed/quality enums and in-game labels — no numerical yield rates, time multipliers, or cost modifiers are stored in the XML records.
+
+---
+
 ## Data pipeline
 
 The script resolves a five-level chain from location down to raw ore:
@@ -408,6 +479,7 @@ sc-mining-extractor/
 ├── extract_mining_data.py     # extraction script
 ├── input/
 │   └── Data/                  # extracted game files go here
+│       ├── Game2.xml          # compiled record database (required for refined commodity data)
 │       └── Libs/Foundry/Records/
 │           ├── mining/
 │           │   ├── mineableelements/
@@ -415,12 +487,14 @@ sc-mining-extractor/
 │           ├── harvestable/
 │           │   ├── harvestablepresets/
 │           │   └── providerpresets/system/
-│           └── entities/mineable/
+│           ├── entities/mineable/
+│           └── refiningprocess/
 └── output/                    # generated JSON files (created on first run)
     ├── ores.json
     ├── deposits.json
     ├── deposits_by_category.json
     ├── ores_in_deposits.json
     ├── locations.json
-    └── ores_by_location.json
+    ├── ores_by_location.json
+    └── refining_processes.json
 ```
